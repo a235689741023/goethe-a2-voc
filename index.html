@@ -187,7 +187,8 @@ const pad2=n=>String(n).padStart(2,'0');
 const fmtDate=d=>d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
 const todayStr=()=>fmtDate(new Date());                 // local date, timezone-safe
 const addDays=(d,n)=>{const[y,m,day]=d.split('-').map(Number);return fmtDate(new Date(y,m-1,day+n));};
-const TODAY=todayStr();
+const dateDiff=(a,b)=>{const p=s=>{const[y,m,d]=s.split('-').map(Number);return Date.UTC(y,m-1,d);};return Math.round((p(a)-p(b))/864e5);}; // a-b in whole days
+let TODAY=todayStr();   // mutable: recomputed when app is resumed on a new day (iOS PWA freeze/restore)
 
 const DEFAULT_SETTINGS={newPerDay:15, maxReviews:120, dir:'de-en', autoPlay:true, theme:'system'};
 let S=load();
@@ -203,6 +204,7 @@ function load(){
   s.log=s.log||{};            // date -> {studied,correct,total}
   s.streak=s.streak||0;
   s.lastActive=s.lastActive||null;
+  s.lastProcessedDay=s.lastProcessedDay||s.lastActive||TODAY;  // seed for missed-day pause/catch-up
   s.wrong=s.wrong||{};        // id -> 1 (recent wrong / session)
   return s;
 }
@@ -218,6 +220,24 @@ function save(){ localStorage.setItem(LSKEY,JSON.stringify(S)); }
     // don't reset to 0 until they actually miss & reopen; keep simple
   }
 })();
+
+/* Missed-day handling: while the app wasn't opened, PAUSE the schedule instead of
+   letting reviews pile up. On a new day, shift every not-yet-due card forward by the
+   number of missed days, so only ~one day's worth becomes due and the daily load
+   stays stable (new words are already capped per day). Runs once per calendar day. */
+function rolloverCatchUp(){
+  if(!S.lastProcessedDay){ S.lastProcessedDay=TODAY; save(); return; }
+  if(TODAY<=S.lastProcessedDay) return;                 // same day (or clock moved back): nothing to do
+  const missed=dateDiff(TODAY,S.lastProcessedDay)-1;    // full days the app was NOT opened
+  if(missed>0){
+    for(const id in S.srs){
+      const c=S.srs[id];
+      if(c && c.due && c.due>S.lastProcessedDay) c.due=addDays(c.due,missed);
+    }
+  }
+  S.lastProcessedDay=TODAY;
+  save();
+}
 
 /* ================= SRS (SM-2) ================= */
 function cardState(id){
@@ -664,12 +684,27 @@ function closeSheet(){ if(window._sheet){window._sheet.remove();window._sheet=nu
 
 /* nav */
 document.querySelectorAll('nav.tabs button').forEach(b=>b.onclick=()=>{TAB=b.dataset.tab; if(TAB==='learn')session=session; render();});
-applyTheme(); render();
+
+/* Recompute the date when the app is brought back to the foreground.
+   iOS home-screen PWAs freeze & restore the page instead of reloading,
+   so a load-time date would stay stuck on the previous day. */
+function refreshDay(){
+  const t=todayStr();
+  if(t===TODAY) return;                 // still the same day: don't disturb anything
+  TODAY=t;
+  rolloverCatchUp();                    // pause/catch-up: shift future reviews so a missed day doesn't pile up
+  if(S.introducedToday.date!==TODAY) S.introducedToday={date:TODAY,ids:[]};  // new day → new-word quota resets
+  save();
+  if(!session && !quiz) render();       // refresh dashboard/queues (don't interrupt an active session/quiz)
+}
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refreshDay(); });
+window.addEventListener('pageshow',refreshDay);
+window.addEventListener('focus',refreshDay);
+
+rolloverCatchUp(); applyTheme(); render();
 </script>
 <script>
-if('serviceWorker' in navigator){
-  window.addEventListener('load',function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
-}
+if('serviceWorker' in navigator){ window.addEventListener('load',function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); }); }
 </script>
 </body>
 </html>
